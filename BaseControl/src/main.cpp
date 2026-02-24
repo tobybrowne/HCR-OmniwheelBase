@@ -37,6 +37,13 @@ int32_t bodyOffset   = 0;
 int32_t bodyDepth    = 0;
 int32_t torsoYaw     = 0;
 bool    initiated    = false;
+int32_t marker_x_i     = 0;
+int32_t marker_y_i     = 0;
+int32_t marker_theta_i     = 0;
+int32_t marker_x     = 0;
+int32_t marker_y     = 0;
+int32_t marker_theta     = 0;
+
 
 float targetX     = 1;
 float targetY     = 0;
@@ -110,6 +117,7 @@ void setup() {
 
 void loop() {
   if (client.connected()) {
+    Serial.println("Connected to server, waiting for data...");
     if (client.available() >= 4) {
       Serial.println("Got Header");
 
@@ -122,10 +130,14 @@ void loop() {
         ((int32_t)lengthBytes[3] << 24);
       Serial.println(packetLength);
 
-      if (packetLength == 12 && client.available() >= 12) {
-        Serial.println("Got actual body.");
-        byte data[12];
-        client.readBytes(data, 12);
+      while(client.available() < packetLength) {
+        delay(10);
+      }
+      
+      #define BODY_LENGTH 20
+      if (packetLength == BODY_LENGTH && client.available() >= BODY_LENGTH) {
+        byte data[BODY_LENGTH];
+        client.readBytes(data, BODY_LENGTH);
 
         bodyOffset =
           (((int32_t)data[0])       |
@@ -145,9 +157,25 @@ void loop() {
            ((int32_t)data[10] << 16) |
            ((int32_t)data[11] << 24)) - torsoYaw_i;
 
+        marker_x =
+          (((int32_t)data[12])       |
+           ((int32_t)data[13] <<  8) |
+           ((int32_t)data[14] << 16) |
+           ((int32_t)data[15] << 24)) - marker_x_i;
+
+        marker_y =
+          (((int32_t)data[16])       |
+           ((int32_t)data[17] <<  8) |
+           ((int32_t)data[18] << 16) |
+           ((int32_t)data[19] << 24)) - marker_y_i;
+
+        marker_theta = torsoYaw;
+
         Serial.print("Body Offset: "); Serial.println(bodyOffset);
         Serial.print("Body Depth: ");  Serial.println(bodyDepth);
         Serial.print("Torso Yaw: ");   Serial.println(torsoYaw);
+        Serial.print("Marker X: ");    Serial.println(marker_x);
+        Serial.print("Marker Y: ");    Serial.println(marker_y);
 
         initiated = true;
       }
@@ -156,16 +184,20 @@ void loop() {
     Serial.println("Disconnected. Reconnecting...");
     client.connect(SERVER_IP, SERVER_PORT);
     delay(1000);
+    return;
   }
 
   if (!initiated) {
     bodyOffset_i = bodyOffset;
     bodyDepth_i  = bodyDepth;
     torsoYaw_i   = torsoYaw;
+    marker_x_i   = marker_x;
+    marker_y_i   = marker_y;
+    marker_theta_i   = marker_theta;
   }
 
 #if USE_EKF
-  checkFiducial();1
+  checkFiducial();
 #endif
 
   int m1, m2, m3;

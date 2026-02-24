@@ -10,6 +10,7 @@ extern float x, y, theta;
 extern long prevEnc1, prevEnc2, prevEnc3;
 extern EKF3 ekf;
 extern unsigned long lastFiducialTime;
+extern int32_t marker_x, marker_y, marker_theta;
 
 void updatePos(SMS_STS st) {
   int enc1 = st.ReadPos(1);
@@ -67,22 +68,19 @@ void checkFiducial() {
   if (now - lastFiducialTime < FIDUCIAL_INTERVAL_MS) return;
   lastFiducialTime = now;
 
-  float noiseX     = ((float)random(-40, 40)) / 1000.0f;
-  float noiseY     = ((float)random(-40, 40)) / 1000.0f;
-  float noiseTheta = ((float)random(-50, 50)) / 1000.0f;
-  float measX      = x + noiseX;
-  float measY      = y + noiseY;
-  float measTheta  = theta + noiseTheta;
+  float measX     = (float)marker_x     / 1000.0f;
+  float measY     = (float)marker_y     / 1000.0f;
+  float measTheta = (float)marker_theta / 1000.0f;
 
   bool accepted = ekf.updateFiducial(measX, measY, measTheta);
   if (accepted) {
     x     = ekf.x[0];
     y     = ekf.x[1];
     theta = ekf.x[2];
-    Serial.print("[Fiducial] meas=( ");
-    Serial.print(measX, 3); Serial.print(", ");
-    Serial.print(measY, 3); Serial.print(")  EKF=( ");
-    Serial.print(x, 4);     Serial.print(", ");
-    Serial.print(y, 4);     Serial.println(")");
+    // Serial.print("[Fiducial] meas=( ");
+    // Serial.print(measX, 3); Serial.print(", ");
+    // Serial.print(measY, 3); Serial.print(")  EKF=( ");
+    // Serial.print(x, 4);     Serial.print(", ");
+    // Serial.print(y, 4);     Serial.println(")");
   }
 }
