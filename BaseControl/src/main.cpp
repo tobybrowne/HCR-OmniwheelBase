@@ -11,8 +11,8 @@ SMS_STS st;
 // ---- WiFi / Server ----
 const char* ssid        = "TobyiPhone";
 const char* password    = "tobybrowne";
-const char* SERVER_IP   = "172.2.10.4";
-const int   SERVER_PORT = 5002;
+const char* SERVER_IP   = "172.20.10.3";
+const int   SERVER_PORT = 5003;
 WiFiClient  client;
 
 // ---- Pose (shared with odometry / motion via extern) ----
@@ -117,7 +117,6 @@ void setup() {
 
 void loop() {
   if (client.connected()) {
-    Serial.println("Connected to server, waiting for data...");
     if (client.available() >= 4) {
       Serial.println("Got Header");
 
@@ -133,8 +132,8 @@ void loop() {
       while(client.available() < packetLength) {
         delay(10);
       }
-      
-      #define BODY_LENGTH 20
+
+      #define BODY_LENGTH 12
       if (packetLength == BODY_LENGTH && client.available() >= BODY_LENGTH) {
         byte data[BODY_LENGTH];
         client.readBytes(data, BODY_LENGTH);
@@ -157,27 +156,35 @@ void loop() {
            ((int32_t)data[10] << 16) |
            ((int32_t)data[11] << 24)) - torsoYaw_i;
 
-        marker_x =
-          (((int32_t)data[12])       |
-           ((int32_t)data[13] <<  8) |
-           ((int32_t)data[14] << 16) |
-           ((int32_t)data[15] << 24)) - marker_x_i;
+        // marker_x =
+        //   (((int32_t)data[12])       |
+        //    ((int32_t)data[13] <<  8) |
+        //    ((int32_t)data[14] << 16) |
+        //    ((int32_t)data[15] << 24)) - marker_x_i;
 
-        marker_y =
-          (((int32_t)data[16])       |
-           ((int32_t)data[17] <<  8) |
-           ((int32_t)data[18] << 16) |
-           ((int32_t)data[19] << 24)) - marker_y_i;
+        // marker_y =
+        //   (((int32_t)data[16])       |
+        //    ((int32_t)data[17] <<  8) |
+        //    ((int32_t)data[18] << 16) |
+        //    ((int32_t)data[19] << 24)) - marker_y_i;
 
-        marker_theta = torsoYaw;
+        // marker_theta = 
+        //   (((int32_t)data[20])       |
+        //    ((int32_t)data[21] <<  8) |
+        //    ((int32_t)data[22] << 16) |
+        //    ((int32_t)data[23] << 24)) - marker_theta_i;
 
         Serial.print("Body Offset: "); Serial.println(bodyOffset);
         Serial.print("Body Depth: ");  Serial.println(bodyDepth);
         Serial.print("Torso Yaw: ");   Serial.println(torsoYaw);
-        Serial.print("Marker X: ");    Serial.println(marker_x);
-        Serial.print("Marker Y: ");    Serial.println(marker_y);
+        // Serial.print("Marker X: ");    Serial.println(marker_x);
+        // Serial.print("Marker Y: ");    Serial.println(marker_y);
+        // Serial.print("Marker Theta: "); Serial.println(marker_theta);
+        // Serial.print("Marker X (init): ");    Serial.println(marker_x_i);
+        // Serial.print("Marker Y (init): ");    Serial.println(marker_y_i);
 
-        initiated = true;
+        // Serial.print("Estimated X: ");    Serial.println(x);
+        // Serial.print("Estimated Y: ");    Serial.println(y);
       }
     }
   } else {
@@ -187,13 +194,18 @@ void loop() {
     return;
   }
 
-  if (!initiated) {
+  marker_x *= -1;
+  marker_y *= -1;
+
+  if (!initiated) { 
     bodyOffset_i = bodyOffset;
     bodyDepth_i  = bodyDepth;
     torsoYaw_i   = torsoYaw;
     marker_x_i   = marker_x;
     marker_y_i   = marker_y;
     marker_theta_i   = marker_theta;
+
+    initiated = true;
   }
 
 #if USE_EKF
@@ -212,6 +224,9 @@ void loop() {
   if (initiated) {
     targetY = (float)bodyOffset / 1000;
     targetX = (float)bodyDepth  / 1000;
+
+    // targetY = 0;
+    // targetX = 0;
     trackUser(st, targetX, targetY, m1, m2, m3);
     delay(10);
   }

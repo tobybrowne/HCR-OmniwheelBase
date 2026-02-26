@@ -1,6 +1,6 @@
 #pragma once
 
-#define USE_EKF   1   // set to 1 to re-enable EKF
+#define USE_EKF   0   // set to 1 to re-enable EKF
 #define DEMO_MODE 0   // set to 1 for circle demo (no WiFi input needed)
 
 #define DEMO_RADIUS        0.5f   // metres
