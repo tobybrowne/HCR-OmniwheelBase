@@ -29,47 +29,45 @@ unsigned long lastFiducialTime = 0;
 // ---- EKF ----
 EKF3 ekf;
 
-// ---- Application state ----
-int32_t bodyOffset_i = 0;
-int32_t bodyDepth_i  = 0;
-int32_t torsoYaw_i   = 0;
-int32_t bodyOffset   = 0;
-int32_t bodyDepth    = 0;
-int32_t torsoYaw     = 0;
-bool    initiated    = false;
+// ---- Shared state (written by wifiTask, read by controlTask) ----
+SemaphoreHandle_t stateMutex;
+
+int32_t bodyOffset_i   = 0;
+int32_t bodyDepth_i    = 0;
+int32_t torsoYaw_i     = 0;
+int32_t bodyOffset     = 0;
+int32_t bodyDepth      = 0;
+int32_t torsoYaw       = 0;
+bool    initiated      = false;
 int32_t marker_x_i     = 0;
 int32_t marker_y_i     = 0;
-int32_t marker_theta_i     = 0;
-int32_t marker_x     = 0;
-int32_t marker_y     = 0;
-int32_t marker_theta     = 0;
-
-
-float targetX     = 1;
-float targetY     = 0;
-float targetTheta = 0;
+int32_t marker_theta_i = 0;
+int32_t marker_x       = 0;
+int32_t marker_y       = 0;
+int32_t marker_theta   = 0;
 
 unsigned long startTime;
 
+// ---- Task handles ----
+TaskHandle_t wifiTaskHandle    = NULL;
+TaskHandle_t controlTaskHandle = NULL;
+
 // ---------------------------------------------------------------
 
-void setup() {
-  Serial.begin(115200);
-
+void wifiTask(void* pvParameters) {
   esp_wifi_restore();
-  delay(200);
+  vTaskDelay(pdMS_TO_TICKS(200));
 
   WiFi.onEvent(WiFiEvent);
-
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.persistent(false);
   WiFi.disconnect(true);
-  delay(200);
+  vTaskDelay(pdMS_TO_TICKS(200));
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     Serial.println("Trying to Connect to WiFi...");
   }
   Serial.println("Connected to WiFi!");
@@ -80,8 +78,135 @@ void setup() {
       Serial.println("Connected to server!");
       break;
     }
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
+
+  // Unblock the control task now that connectivity is established
+  xTaskNotifyGive(controlTaskHandle);
+
+  for (;;) {
+    if (!client.connected()) {
+      Serial.println("Disconnected. Reconnecting...");
+      client.connect(SERVER_IP, SERVER_PORT);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+
+    if (client.available() < 4) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+
+    Serial.println("Got Header");
+
+    byte lengthBytes[4];
+    client.readBytes(lengthBytes, 4);
+    int32_t packetLength =
+      ((int32_t)lengthBytes[0])        |
+      ((int32_t)lengthBytes[1] <<  8)  |
+      ((int32_t)lengthBytes[2] << 16)  |
+      ((int32_t)lengthBytes[3] << 24);
+    Serial.println(packetLength);
+
+    // Wait for full payload with a timeout so we never block indefinitely
+    unsigned long waitStart = millis();
+    while (client.available() < packetLength) {
+      if (millis() - waitStart > 500) break;
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    #define BODY_LENGTH 12
+    if (packetLength == BODY_LENGTH && client.available() >= BODY_LENGTH) {
+      byte data[BODY_LENGTH];
+      client.readBytes(data, BODY_LENGTH);
+
+      int32_t newBodyOffset =
+        (((int32_t)data[0])       |
+         ((int32_t)data[1] <<  8) |
+         ((int32_t)data[2] << 16) |
+         ((int32_t)data[3] << 24));
+
+      int32_t newBodyDepth =
+        (((int32_t)data[4])       |
+         ((int32_t)data[5] <<  8) |
+         ((int32_t)data[6] << 16) |
+         ((int32_t)data[7] << 24));
+
+      int32_t newTorsoYaw =
+        (((int32_t)data[8])        |
+         ((int32_t)data[9]  <<  8) |
+         ((int32_t)data[10] << 16) |
+         ((int32_t)data[11] << 24));
+
+      if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        if (!initiated) {
+          bodyOffset_i   = newBodyOffset;
+          bodyDepth_i    = newBodyDepth;
+          torsoYaw_i     = newTorsoYaw;
+          marker_x_i     = marker_x;
+          marker_y_i     = marker_y;
+          marker_theta_i = marker_theta;
+          initiated      = true;
+        }
+        bodyOffset = newBodyOffset - bodyOffset_i;
+        bodyDepth  = newBodyDepth  - bodyDepth_i;
+        torsoYaw   = newTorsoYaw   - torsoYaw_i;
+        xSemaphoreGive(stateMutex);
+      }
+
+      Serial.print("Body Offset: "); Serial.println(bodyOffset);
+      Serial.print("Body Depth: ");  Serial.println(bodyDepth);
+      Serial.print("Torso Yaw: ");   Serial.println(torsoYaw);
+    }
+  }
+}
+
+void controlTask(void* pvParameters) {
+  // Wait until wifiTask has connected to WiFi and server
+  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+  const TickType_t period   = pdMS_TO_TICKS(20); // 50 Hz
+  TickType_t       lastWake = xTaskGetTickCount();
+
+  for (;;) {
+    vTaskDelayUntil(&lastWake, period);
+
+#if USE_EKF
+    checkFiducial();
+#endif
+
+    int m1, m2, m3;
+
+#if DEMO_MODE
+    float t = (millis() - startTime) / 1000.0f;
+    float localTargetX = DEMO_RADIUS * cos(DEMO_ANGULAR_SPEED * t);
+    float localTargetY = DEMO_RADIUS * sin(DEMO_ANGULAR_SPEED * t);
+    trackUser(st, localTargetX, localTargetY, m1, m2, m3);
+#else
+    float localTargetX  = 0;
+    float localTargetY  = 0;
+    bool  localInitiated = false;
+
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      localInitiated = initiated;
+      localTargetX   = (float)bodyDepth  / 1000.0f;
+      localTargetY   = (float)bodyOffset / 1000.0f;
+      xSemaphoreGive(stateMutex);
+    }
+
+    if (localInitiated) {
+      trackUser(st, localTargetX, localTargetY, m1, m2, m3);
+    }
+#endif
+  }
+}
+
+// ---------------------------------------------------------------
+
+void setup() {
+  Serial.begin(115200);
+
+  stateMutex = xSemaphoreCreateMutex();
 
   Serial1.begin(1000000, SERIAL_8N1, S_RXD, S_TXD);
   st.pSerial = &Serial1;
@@ -111,124 +236,13 @@ void setup() {
   ekf.b = 2.0f * ROBOT_RADIUS;
 
   calibratePos();
-
   startTime = millis();
+
+  // controlTask must be created first so its handle is valid when wifiTask notifies it
+  xTaskCreatePinnedToCore(controlTask, "controlTask", 4096, NULL, 2, &controlTaskHandle, 1);
+  xTaskCreatePinnedToCore(wifiTask,    "wifiTask",    8192, NULL, 1, &wifiTaskHandle,    0);
 }
 
 void loop() {
-  if (client.connected()) {
-    if (client.available() >= 4) {
-      Serial.println("Got Header");
-
-      byte lengthBytes[4];
-      client.readBytes(lengthBytes, 4);
-      int32_t packetLength =
-        ((int32_t)lengthBytes[0])        |
-        ((int32_t)lengthBytes[1] <<  8)  |
-        ((int32_t)lengthBytes[2] << 16)  |
-        ((int32_t)lengthBytes[3] << 24);
-      Serial.println(packetLength);
-
-      while(client.available() < packetLength) {
-        delay(10);
-      }
-
-      #define BODY_LENGTH 12
-      if (packetLength == BODY_LENGTH && client.available() >= BODY_LENGTH) {
-        byte data[BODY_LENGTH];
-        client.readBytes(data, BODY_LENGTH);
-
-        bodyOffset =
-          (((int32_t)data[0])       |
-           ((int32_t)data[1] <<  8) |
-           ((int32_t)data[2] << 16) |
-           ((int32_t)data[3] << 24)) - bodyOffset_i;
-
-        bodyDepth =
-          (((int32_t)data[4])       |
-           ((int32_t)data[5] <<  8) |
-           ((int32_t)data[6] << 16) |
-           ((int32_t)data[7] << 24)) - bodyDepth_i;
-
-        torsoYaw =
-          (((int32_t)data[8])        |
-           ((int32_t)data[9]  <<  8) |
-           ((int32_t)data[10] << 16) |
-           ((int32_t)data[11] << 24)) - torsoYaw_i;
-
-        // marker_x =
-        //   (((int32_t)data[12])       |
-        //    ((int32_t)data[13] <<  8) |
-        //    ((int32_t)data[14] << 16) |
-        //    ((int32_t)data[15] << 24)) - marker_x_i;
-
-        // marker_y =
-        //   (((int32_t)data[16])       |
-        //    ((int32_t)data[17] <<  8) |
-        //    ((int32_t)data[18] << 16) |
-        //    ((int32_t)data[19] << 24)) - marker_y_i;
-
-        // marker_theta = 
-        //   (((int32_t)data[20])       |
-        //    ((int32_t)data[21] <<  8) |
-        //    ((int32_t)data[22] << 16) |
-        //    ((int32_t)data[23] << 24)) - marker_theta_i;
-
-        Serial.print("Body Offset: "); Serial.println(bodyOffset);
-        Serial.print("Body Depth: ");  Serial.println(bodyDepth);
-        Serial.print("Torso Yaw: ");   Serial.println(torsoYaw);
-        // Serial.print("Marker X: ");    Serial.println(marker_x);
-        // Serial.print("Marker Y: ");    Serial.println(marker_y);
-        // Serial.print("Marker Theta: "); Serial.println(marker_theta);
-        // Serial.print("Marker X (init): ");    Serial.println(marker_x_i);
-        // Serial.print("Marker Y (init): ");    Serial.println(marker_y_i);
-
-        // Serial.print("Estimated X: ");    Serial.println(x);
-        // Serial.print("Estimated Y: ");    Serial.println(y);
-      }
-    }
-  } else {
-    Serial.println("Disconnected. Reconnecting...");
-    client.connect(SERVER_IP, SERVER_PORT);
-    delay(1000);
-    return;
-  }
-
-  marker_x *= -1;
-  marker_y *= -1;
-
-  if (!initiated) { 
-    bodyOffset_i = bodyOffset;
-    bodyDepth_i  = bodyDepth;
-    torsoYaw_i   = torsoYaw;
-    marker_x_i   = marker_x;
-    marker_y_i   = marker_y;
-    marker_theta_i   = marker_theta;
-
-    initiated = true;
-  }
-
-#if USE_EKF
-  checkFiducial();
-#endif
-
-  int m1, m2, m3;
-
-#if DEMO_MODE
-  float t = (millis() - startTime) / 1000.0f;
-  targetX = DEMO_RADIUS * cos(DEMO_ANGULAR_SPEED * t);
-  targetY = DEMO_RADIUS * sin(DEMO_ANGULAR_SPEED * t);
-  trackUser(st, targetX, targetY, m1, m2, m3);
-  delay(10);
-#else
-  if (initiated) {
-    targetY = (float)bodyOffset / 1000;
-    targetX = (float)bodyDepth  / 1000;
-
-    // targetY = 0;
-    // targetX = 0;
-    trackUser(st, targetX, targetY, m1, m2, m3);
-    delay(10);
-  }
-#endif
+  vTaskDelete(NULL); // Arduino loop task not needed
 }
